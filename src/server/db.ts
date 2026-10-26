@@ -20,6 +20,9 @@ export interface OrderRecord {
   subtotal?: number;
   total?: number;
   status: string;
+  st?: number;
+  x?: boolean;
+  updatedAt?: string;
   source: string;
   businessId?: number | string;
   lines?: {

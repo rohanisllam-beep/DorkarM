@@ -404,9 +404,52 @@ function getSmtpConfig(): SmtpResolvedConfig {
   };
 }
 
+function getProductionAppUrl(req?: Request): string {
+  const appUrl = (process.env.APP_URL || '').trim();
+  if (appUrl && !appUrl.includes('localhost') && !appUrl.includes('0.0.0.0')) {
+    return appUrl.replace(/\/+$/, '');
+  }
+  const publicUrl = (process.env.PUBLIC_URL || process.env.BASE_URL || '').trim();
+  if (publicUrl && !publicUrl.includes('localhost') && !publicUrl.includes('0.0.0.0')) {
+    return publicUrl.replace(/\/+$/, '');
+  }
+  if (req) {
+    const origin = req.get('origin');
+    if (origin && !origin.includes('localhost') && !origin.includes('0.0.0.0')) {
+      return origin.replace(/\/+$/, '');
+    }
+    const host = req.get('host');
+    if (host && !host.includes('localhost') && !host.includes('0.0.0.0')) {
+      const proto = req.get('x-forwarded-proto') || req.protocol || 'https';
+      return `${proto}://${host}`.replace(/\/+$/, '');
+    }
+  }
+  return 'https://ais-dev-onptc5sqvrmel7pkjwxipq-890145645458.asia-east1.run.app';
+}
+
+const VALID_ADMIN_PASSWORDS = ['mirzapur', 'rider123'];
+
+function isAuthorizedAdmin(req: Request): boolean {
+  const passHeader = String(req.headers['x-admin-pass'] || req.headers['x-admin-key'] || '').trim();
+  const authHeader = String(req.headers['authorization'] || '').trim();
+  
+  if (VALID_ADMIN_PASSWORDS.includes(passHeader)) return true;
+  
+  if (authHeader.startsWith('Bearer ')) {
+    const token = authHeader.slice(7).trim();
+    if (VALID_ADMIN_PASSWORDS.includes(token)) return true;
+  }
+
+  const passQuery = String(req.query.admin_pass || req.query.admin_key || '').trim();
+  if (VALID_ADMIN_PASSWORDS.includes(passQuery)) return true;
+
+  return false;
+}
+
 async function sendOrderNotificationEmail(
   order: OrderRecord,
-  forceResend = false
+  forceResend = false,
+  req?: Request
 ): Promise<{ sent: boolean; duplicateSkipped?: boolean; message: string; messageId?: string }> {
   // Prevent duplicate notification emails on retries unless forceResend is requested
   if (order.emailSent && !forceResend) {
@@ -419,6 +462,10 @@ async function sendOrderNotificationEmail(
   }
 
   const config = getSmtpConfig();
+  const appUrl = getProductionAppUrl(req);
+  const manageUrl = `${appUrl}/#manage=${order.id}`;
+  const customerTrackUrl = `${appUrl}/#track=${order.id}`;
+  const orderStatus = order.status || 'নতুন অর্ডার';
 
   if (!config.isConfigured) {
     const errorMsg = `SMTP কনফিগারেশন অসম্পূর্ণ। অনুপস্থিত ভ্যারিয়েবল: ${config.missing.join(', ')}। (.env বা Environment Variables-এ SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, ADMIN_EMAIL সেট করুন)`;
@@ -430,6 +477,7 @@ async function sendOrderNotificationEmail(
     console.log(`Customer: ${order.customerName} (${order.phone})`);
     console.log(`Address: ${order.address}`);
     console.log(`Items: ${order.items}`);
+    console.log(`Manage URL: ${manageUrl}`);
     console.log('============================================================\n');
     return { sent: false, message: errorMsg };
   }
@@ -491,8 +539,9 @@ async function sendOrderNotificationEmail(
             <tr><td style="width: 130px; color: #6b7280; padding: 6px 0;">গ্রাহকের নাম:</td><td style="font-weight: 600; color: #111827;">${order.customerName}</td></tr>
             <tr><td style="color: #6b7280; padding: 6px 0;">মোবাইল নম্বর:</td><td><a href="tel:${order.phone}" style="color: #059669; font-weight: 600; text-decoration: none;">${order.phone}</a> (কল করতে চাপুন)</td></tr>
             <tr><td style="color: #6b7280; padding: 6px 0;">ডেলিভারি ঠিকানা:</td><td style="font-weight: 500;">${order.address}</td></tr>
+            <tr><td style="color: #6b7280; padding: 6px 0;">বর্তমান স্ট্যাটাস:</td><td><span style="display: inline-block; padding: 3px 10px; background: #e0f2fe; color: #0369a1; border-radius: 12px; font-weight: 600; font-size: 13px;">${orderStatus}</span></td></tr>
             ${order.notes ? `<tr><td style="color: #6b7280; padding: 6px 0;">বিশেষ নির্দেশ:</td><td style="color: #b45309; font-weight: 500;">${order.notes}</td></tr>` : ''}
-            ${order.distanceKm ? `<tr><td style="color: #6b7280; padding: 6px 0;">দূরত্ব (GPS):</td><td>প্রায় ${order.distanceKm} কিমি (সার্ভিস এরিয়া: ৫ কিমি)</td></tr>` : ''}
+            ${order.distanceKm ? `<tr><td style="color: #6b7280; padding: 6px 0;">দূরত্ব (GPS):</td><td>প্রায় ${order.distanceKm} কিমি</td></tr>` : ''}
           </table>
 
           <h3 style="margin: 0 0 12px; font-size: 15px; border-bottom: 2px solid #f3f4f6; padding-bottom: 8px; color: #111827;">📦 অর্ডারকৃত পণ্যের তালিকা</h3>
@@ -528,8 +577,21 @@ async function sendOrderNotificationEmail(
             </div>
           </div>
 
+          <!-- Direct Order Management Link with Admin Authentication Warning -->
+          <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 10px; padding: 18px 20px; text-align: center; margin: 24px 0 16px;">
+            <div style="font-size: 13px; color: #166534; font-weight: 600; margin-bottom: 10px;">
+              অর্ডারটি পরিচালনা ও স্ট্যাটাস আপডেট করতে নিচের বাটনে চাপুন:
+            </div>
+            <a href="${manageUrl}" target="_blank" style="display: inline-block; background: #059669; color: #ffffff; text-decoration: none; font-size: 15px; font-weight: 700; padding: 13px 30px; border-radius: 8px; box-shadow: 0 4px 8px -1px rgba(5,150,105,0.35);">
+              🛠️ Manage Order / অর্ডার পরিচালনা করুন
+            </a>
+            <div style="font-size: 12px; color: #6b7280; margin-top: 10px;">
+              🔒 নিরাপত্তা নোট: অননুমোদিত প্রবেশ রোধে লিংকে প্রবেশের পর অ্যাডমিন অ্যাকাউন্টে লগইন করতে হবে।
+            </div>
+          </div>
+
           <div style="background: #ecfdf5; border-radius: 8px; padding: 12px 16px; text-align: center; font-size: 13px; color: #065f46; margin-bottom: 12px;">
-            🔔 অর্ডার ট্র্যাকিং লিংক: <a href="http://localhost:3000/#/track/${order.id}" style="color: #059669; font-weight: 600;">ট্র্যাক করুন (#${order.id})</a>
+            🔔 গ্রাহক ট্র্যাকিং লিংক: <a href="${customerTrackUrl}" style="color: #059669; font-weight: 600;">ট্র্যাক করুন (#${order.id})</a>
           </div>
 
           <div style="text-align: center; color: #9ca3af; font-size: 12px; padding-top: 16px; border-top: 1px solid #f3f4f6;">
@@ -550,6 +612,7 @@ async function sendOrderNotificationEmail(
 [নতুন অর্ডার #${order.id}]
 দোকান: ${order.preferredStore} (${order.category})
 অর্ডারের সময়: ${formattedTime}
+বর্তমান স্ট্যাটাস: ${orderStatus}
 ========================================
 
 👤 গ্রাহকের তথ্য:
@@ -567,7 +630,12 @@ ${textLines}
 সর্বমোট: ${order.total ? `৳${order.total}` : `৳${order.deliveryCharge} + ক্যাশ মেমো`}
 পেমেন্ট পদ্ধতি: ক্যাশ অন ডেলিভারি (Cash on Delivery)
 
-🔗 ট্র্যাকিং: http://localhost:3000/#/track/${order.id}
+🛠️ অর্ডার পরিচালনা (Manage Order):
+${manageUrl}
+(শুধুমাত্র অনুমোদিত অ্যাডমিন লগইন করে স্ট্যাটাস পরিচালনা করতে পারবেন)
+
+🔗 গ্রাহক ট্র্যাকিং লিংক:
+${customerTrackUrl}
 বিজ্ঞপ্তি প্রেরক: দরকারী — ভাওয়াল মির্জাপুর বাজার
 ========================================
   `.trim();
@@ -658,7 +726,7 @@ app.post('/api/orders', async (req: Request, res: Response) => {
     }) : [];
 
     const subtotal = hasPricedItems ? computedSubtotal : (typeof reqSubtotal === 'number' ? reqSubtotal : 0);
-    const deliveryCharge = reqDelivery !== undefined ? Number(reqDelivery) : 60;
+    const deliveryCharge = reqDelivery !== undefined ? Number(reqDelivery) : 30;
     const total = subtotal > 0 ? (subtotal + deliveryCharge) : undefined;
 
     // Generate or clean items text list
@@ -725,7 +793,7 @@ app.post('/api/orders', async (req: Request, res: Response) => {
     }
 
     // Dispatch email notification to admin with duplicate protection
-    const emailResult = await sendOrderNotificationEmail(orderRecord, false);
+    const emailResult = await sendOrderNotificationEmail(orderRecord, false, req);
     if (emailResult.sent) {
       if (!emailResult.duplicateSkipped) {
         db.updateOrderStatus(orderRecord.id, {
@@ -767,7 +835,7 @@ app.post('/api/orders/:id/resend-email', async (req: Request, res: Response) => 
       return;
     }
 
-    const emailResult = await sendOrderNotificationEmail(order, true);
+    const emailResult = await sendOrderNotificationEmail(order, true, req);
     if (emailResult.sent) {
       db.updateOrderStatus(order.id, {
         emailSent: true,
@@ -795,6 +863,54 @@ app.post('/api/orders/:id/resend-email', async (req: Request, res: Response) => 
   }
 });
 
+// API: Update Order Status by Authorized Admin
+app.patch('/api/orders/:id/status', (req: Request, res: Response) => {
+  try {
+    const orderId = req.params.id;
+    const order = db.getOrderById(orderId);
+    if (!order) {
+      res.status(404).json({ success: false, error: `অর্ডার #${orderId} খুঁজে পাওয়া যায়নি।` });
+      return;
+    }
+
+    // Authorization check: Only authenticated admin can update order status
+    if (!isAuthorizedAdmin(req)) {
+      res.status(401).json({
+        success: false,
+        error: 'অননুমোদিত: অর্ডার পরিচালনা করতে অ্যাডমিন লগইন প্রয়োজন।',
+      });
+      return;
+    }
+
+    const { status, st, x, note } = req.body;
+    if (!status && typeof st !== 'number' && typeof x !== 'boolean') {
+      res.status(400).json({ success: false, error: 'নতুন স্ট্যাটাস উল্লেখ করুন।' });
+      return;
+    }
+
+    const isCancelled = x === true || String(status).includes('বাতিল') || String(status).toLowerCase().includes('cancel');
+    const updates: Partial<OrderRecord> = {
+      status: status || (isCancelled ? 'বাতিল করা হয়েছে' : order.status),
+      st: typeof st === 'number' ? st : (isCancelled ? -1 : order.st),
+      x: isCancelled,
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (note) {
+      updates.notes = order.notes ? `${order.notes} | ${note}` : String(note);
+    }
+
+    const updated = db.updateOrderStatus(orderId, updates);
+    res.json({
+      success: true,
+      message: `অর্ডার #${orderId} এর স্ট্যাটাস সফলভাবে '${updates.status}' এ আপডেট করা হয়েছে।`,
+      data: updated,
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // API: Check Email System Configuration Status (no secrets leaked)
 app.get('/api/email-status', (_req: Request, res: Response) => {
   const cfg = getSmtpConfig();
@@ -807,6 +923,33 @@ app.get('/api/email-status', (_req: Request, res: Response) => {
     recipient: cfg.toEmail,
     senderConfigured: !!cfg.user,
   });
+});
+
+// API: Sync Customer Orders (Customers can only query their own orders by ID list or phone)
+app.post('/api/orders/sync', (req: Request, res: Response) => {
+  try {
+    const { ids, phone } = req.body;
+    const idList = Array.isArray(ids) ? ids.map(String) : [];
+    const cleanPhone = phone ? String(phone).replace(/\D/g, '') : '';
+
+    if (idList.length === 0 && !cleanPhone) {
+      res.json({ success: true, data: [] });
+      return;
+    }
+
+    const allOrders = db.getOrders();
+    const matched = allOrders.filter((o) => {
+      if (idList.includes(o.id)) return true;
+      if (cleanPhone && cleanPhone.length >= 8 && o.phone.replace(/\D/g, '').includes(cleanPhone)) {
+        return true;
+      }
+      return false;
+    });
+
+    res.json({ success: true, count: matched.length, data: matched });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 // API: Get Order by ID
@@ -823,10 +966,27 @@ app.get('/api/orders/:id', (req: Request, res: Response) => {
   }
 });
 
-// API: List Orders
+// API: List Orders (Authorized admin sees all; non-admins can only see their own via phone or specific id)
 app.get('/api/orders', (req: Request, res: Response) => {
   try {
-    const { phone, status, limit } = req.query;
+    const { phone, status, limit, id } = req.query;
+    const isAdmin = isAuthorizedAdmin(req);
+
+    // If not admin, require either specific order ID or customer's phone
+    if (!isAdmin && !phone && !id) {
+      res.status(403).json({
+        success: false,
+        error: 'অননুমোদিত: সকল অর্ডার শুধুমাত্র অ্যাডমিন দেখতে পারবেন। গ্রাহকরা তাদের নিজস্ব মোবাইল নম্বর বা অর্ডার আইডি দিয়ে দেখতে পারেন।',
+      });
+      return;
+    }
+
+    if (id) {
+      const order = db.getOrderById(String(id));
+      res.json({ success: true, count: order ? 1 : 0, data: order ? [order] : [] });
+      return;
+    }
+
     const orders = db.getOrders({
       phone: phone ? String(phone) : undefined,
       status: status ? String(status) : undefined,
