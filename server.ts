@@ -501,107 +501,119 @@ async function sendOrderNotificationEmail(
     }
   } catch (e) {}
 
-  const linesHtml = (order.lines && order.lines.length > 0)
-    ? order.lines.map((l, i) => `
-        <tr style="border-bottom: 1px solid #e5e7eb;">
-          <td style="padding: 10px 8px; font-weight: 500;">
-            ${i + 1}. ${l.n}
-            ${l.o && Object.keys(l.o).length ? `<div style="font-size: 12px; color: #6b7280; font-weight: normal; margin-top: 2px;">অপশন: ${Object.entries(l.o).map(([k, v]) => `${k}: ${v}`).join(', ')}</div>` : ''}
-            ${l.note ? `<div style="font-size: 12px; color: #6b7280; font-weight: normal; margin-top: 2px;">নোট: ${l.note}</div>` : ''}
+  const esc = (t: any) => String(t == null ? '' : t).replace(/[&<>"]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]));
+  const bn = (n: any) => Number(n || 0).toLocaleString('bn-BD', { maximumFractionDigits: 1 });
+  const F = "'Hind Siliguri','Noto Sans Bengali',Segoe UI,Arial,sans-serif";
+  const row = (a: string, b: string) => `<tr><td style="padding:6px 0;font:13px ${F};color:#6b6b74;width:92px;vertical-align:top">${a}</td><td style="padding:6px 0;font:600 14px ${F};color:#1b1b1f">${b}</td></tr>`;
+
+  const itemRows = (order.lines && order.lines.length > 0)
+    ? order.lines.map((l) => `
+        <tr>
+          <td style="padding:12px 0;border-bottom:1px solid #f3e3ea">
+            <div style="font:600 14px ${F};color:#1b1b1f">${esc(l.n || (l as any).t)}</div>
+            <div style="font:12px ${F};color:#6b6b74;margin-top:2px">${esc(order.preferredStore || 'ভাওয়াল মির্জাপুর বাজার')} · × ${bn(l.q)}</div>
+            ${l.o && Object.keys(l.o).length ? `<div style="font-size:11px;color:#888892;margin-top:2px;">অপশন: ${Object.entries(l.o).map(([k, v]) => `${esc(k)}: ${esc(v)}`).join(', ')}</div>` : ''}
+            ${l.note ? `<div style="font-size:11px;color:#888892;margin-top:2px;">নোট: ${esc(l.note)}</div>` : ''}
           </td>
-          <td style="padding: 10px 8px; text-align: center; color: #4b5563;">${l.p ? `৳${l.p}` : 'মেমো অনুযায়ী'}</td>
-          <td style="padding: 10px 8px; text-align: center; font-weight: 600;">${l.q}</td>
-          <td style="padding: 10px 8px; text-align: right; font-weight: 600; color: #111827;">${l.p ? `৳${l.p * l.q}` : 'মেমো অনুযায়ী'}</td>
+          <td align="right" style="padding:12px 0;border-bottom:1px solid #f3e3ea;font:700 14px ${F};color:#1b1b1f;white-space:nowrap">
+            ${l.p ? `৳ ${bn(l.p * l.q)}` : 'দাম পরে জানানো হবে'}
+          </td>
         </tr>
       `).join('')
-    : `<tr><td colspan="4" style="padding: 12px 8px; white-space: pre-wrap; color: #374151;">${order.items}</td></tr>`;
+    : `<tr>
+        <td style="padding:12px 0;border-bottom:1px solid #f3e3ea;font:14px ${F};color:#1b1b1f">${esc(order.items)}</td>
+        <td align="right" style="padding:12px 0;border-bottom:1px solid #f3e3ea;font:700 14px ${F};color:#1b1b1f">${order.subtotal ? `৳ ${bn(order.subtotal)}` : 'মেমো অনুযায়ী'}</td>
+      </tr>`;
 
-  const html = `
-    <!DOCTYPE html>
-    <html lang="bn">
-    <head><meta charset="utf-8"></head>
-    <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #f3f4f6; margin: 0; padding: 24px; color: #1f2937;">
-      <div style="max-width: 620px; margin: 0 auto; background: #ffffff; border-radius: 12px; overflow: hidden; border: 1px solid #e5e7eb; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.06);">
-        <div style="background: linear-gradient(135deg, #059669 0%, #0d9488 100%); padding: 24px 28px; color: #ffffff;">
-          <div style="font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; opacity: 0.9; font-weight: 600;">দরকারী — ভাওয়াল মির্জাপুর বাজার, গাজীপুর</div>
-          <h1 style="margin: 6px 0 0; font-size: 24px; font-weight: 700; color: #ffffff;">নতুন অর্ডার এসেছে #${order.id}</h1>
-          <p style="margin: 6px 0 0; opacity: 0.9; font-size: 14px;">অর্ডারের সময়: ${formattedTime}</p>
-        </div>
+  const hasLocation = Boolean(order.latitude && order.longitude);
+  const locationHtml = hasLocation
+    ? `<a href="https://maps.google.com/?q=${order.latitude},${order.longitude}" target="_blank" style="color:#12a091;text-decoration:none">ম্যাপে দেখো${order.distanceKm ? ' · ' + bn(order.distanceKm) + ' কিমি' : ''}</a>`
+    : '';
 
-        <div style="padding: 24px 28px;">
-          <div style="background: #f0fdf4; border-left: 4px solid #10b981; padding: 12px 16px; margin-bottom: 22px; border-radius: 4px;">
-            <div style="font-weight: 600; color: #065f46; font-size: 15px;">🏪 দোকান: ${order.preferredStore}</div>
-            <div style="color: #047857; font-size: 13px; margin-top: 2px;">ক্যাটাগরি: ${order.category}</div>
-          </div>
+  const totalCalculated = order.total || ((order.subtotal || 0) + (order.deliveryCharge || 30));
 
-          <h3 style="margin: 0 0 12px; font-size: 15px; border-bottom: 2px solid #f3f4f6; padding-bottom: 8px; color: #111827;">👤 গ্রাহক ও ডেলিভারির তথ্য</h3>
-          <table style="width: 100%; margin-bottom: 22px; font-size: 14px; border-collapse: collapse;">
-            <tr><td style="width: 130px; color: #6b7280; padding: 6px 0;">গ্রাহকের নাম:</td><td style="font-weight: 600; color: #111827;">${order.customerName}</td></tr>
-            <tr><td style="color: #6b7280; padding: 6px 0;">মোবাইল নম্বর:</td><td><a href="tel:${order.phone}" style="color: #059669; font-weight: 600; text-decoration: none;">${order.phone}</a> (কল করতে চাপুন)</td></tr>
-            <tr><td style="color: #6b7280; padding: 6px 0;">ডেলিভারি ঠিকানা:</td><td style="font-weight: 500;">${order.address}</td></tr>
-            <tr><td style="color: #6b7280; padding: 6px 0;">বর্তমান স্ট্যাটাস:</td><td><span style="display: inline-block; padding: 3px 10px; background: #e0f2fe; color: #0369a1; border-radius: 12px; font-weight: 600; font-size: 13px;">${orderStatus}</span></td></tr>
-            ${order.notes ? `<tr><td style="color: #6b7280; padding: 6px 0;">বিশেষ নির্দেশ:</td><td style="color: #b45309; font-weight: 500;">${order.notes}</td></tr>` : ''}
-            ${order.distanceKm ? `<tr><td style="color: #6b7280; padding: 6px 0;">দূরত্ব (GPS):</td><td>প্রায় ${order.distanceKm} কিমি</td></tr>` : ''}
-          </table>
-
-          <h3 style="margin: 0 0 12px; font-size: 15px; border-bottom: 2px solid #f3f4f6; padding-bottom: 8px; color: #111827;">📦 অর্ডারকৃত পণ্যের তালিকা</h3>
-          <table style="width: 100%; border-collapse: collapse; font-size: 14px; margin-bottom: 22px;">
-            <thead>
-              <tr style="background: #f9fafb; color: #4b5563; font-size: 12px; text-transform: uppercase;">
-                <th style="padding: 8px 10px; text-align: left;">পণ্য ও অপশন</th>
-                <th style="padding: 8px 10px; text-align: center; width: 80px;">একক দর</th>
-                <th style="padding: 8px 10px; text-align: center; width: 50px;">পরিমাণ</th>
-                <th style="padding: 8px 10px; text-align: right; width: 90px;">মোট</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${linesHtml}
-            </tbody>
-          </table>
-
-          <div style="background: #f9fafb; border-radius: 8px; padding: 16px 20px; margin-bottom: 22px; border: 1px solid #f3f4f6;">
-            <div style="display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 14px;">
-              <span style="color: #6b7280;">পণ্য সাবটোটাল:</span>
-              <span style="font-weight: 500;">${order.subtotal ? `৳${order.subtotal}` : 'ক্যাশ মেমো অনুযায়ী'}</span>
-            </div>
-            <div style="display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 14px;">
-              <span style="color: #6b7280;">ডেলিভারি চার্জ:</span>
-              <span style="font-weight: 600; color: #059669;">৳${order.deliveryCharge}</span>
-            </div>
-            <div style="display: flex; justify-content: space-between; border-top: 1px dashed #d1d5db; padding-top: 10px; font-size: 16px; font-weight: 700; color: #111827;">
-              <span>সর্বমোট প্রদেয়:</span>
-              <span style="color: #059669;">${order.total ? `৳${order.total}` : `৳${order.deliveryCharge} + ক্যাশ মেমো`}</span>
-            </div>
-            <div style="margin-top: 8px; font-size: 12px; color: #6b7280; text-align: right;">
-              পেমেন্ট পদ্ধতি: <strong>ক্যাশ অন ডেলিভারি (Cash on Delivery)</strong>
-            </div>
-          </div>
-
-          <!-- Direct Order Management Link with Admin Authentication Warning -->
-          <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 10px; padding: 18px 20px; text-align: center; margin: 24px 0 16px;">
-            <div style="font-size: 13px; color: #166534; font-weight: 600; margin-bottom: 10px;">
-              অর্ডারটি পরিচালনা ও স্ট্যাটাস আপডেট করতে নিচের বাটনে চাপুন:
-            </div>
-            <a href="${manageUrl}" target="_blank" style="display: inline-block; background: #059669; color: #ffffff; text-decoration: none; font-size: 15px; font-weight: 700; padding: 13px 30px; border-radius: 8px; box-shadow: 0 4px 8px -1px rgba(5,150,105,0.35);">
-              🛠️ Manage Order / অর্ডার পরিচালনা করুন
-            </a>
-            <div style="font-size: 12px; color: #6b7280; margin-top: 10px;">
-              🔒 নিরাপত্তা নোট: অননুমোদিত প্রবেশ রোধে লিংকে প্রবেশের পর অ্যাডমিন অ্যাকাউন্টে লগইন করতে হবে।
-            </div>
-          </div>
-
-          <div style="background: #ecfdf5; border-radius: 8px; padding: 12px 16px; text-align: center; font-size: 13px; color: #065f46; margin-bottom: 12px;">
-            🔔 গ্রাহক ট্র্যাকিং লিংক: <a href="${customerTrackUrl}" style="color: #059669; font-weight: 600;">ট্র্যাক করুন (#${order.id})</a>
-          </div>
-
-          <div style="text-align: center; color: #9ca3af; font-size: 12px; padding-top: 16px; border-top: 1px solid #f3f4f6;">
-            দরকারী (Dorkar) — ভাওয়াল মির্জাপুর বাজার (গাজীপুর) লোকাল ডেলিভারি সার্ভিস
-          </div>
-        </div>
-      </div>
-    </body>
-    </html>
-  `;
+  const html = `<!doctype html>
+<html>
+<body style="margin:0;padding:0;background:#fbeef2">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#fbeef2">
+    <tr>
+      <td align="center" style="padding:24px 12px">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:560px;background:#ffffff;border-radius:28px;overflow:hidden;border:1px solid #f6e6ed">
+          <tr>
+            <td bgcolor="#e8487a" style="background:#e8487a;padding:26px 28px 22px">
+              <div style="font:700 13px ${F};color:#ffffffcc;letter-spacing:.08em">দরকার · মির্জাপুর বাজার</div>
+              <div style="font:700 24px ${F};color:#ffffff;margin-top:10px">নতুন অর্ডার এসেছে 🎉</div>
+              <div style="font:14px ${F};color:#ffffffe6;margin-top:4px">নিচের তথ্য দেখে দ্রুত প্রস্তুত করো</div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:22px 28px 6px">
+              <span style="display:inline-block;background:#fff4f8;color:#a61e4d;font:700 13px ${F};padding:6px 14px;border-radius:12px;border:1px solid #ffc7da">অর্ডার #${esc(order.id)}</span>
+              <span style="font:12px ${F};color:#6b6b74;margin-left:10px">${formattedTime}</span>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:10px 28px 4px">
+              <div style="font:700 15px ${F};color:#1b1b1f;margin-bottom:4px">📍 গ্রাহকের তথ্য</div>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
+                ${row('নাম', esc(order.customerName))}
+                ${row('ফোন', `<a href="tel:${esc(order.phone)}" style="color:#12a091;text-decoration:none">${esc(order.phone)}</a>`)}
+                ${row('ঠিকানা', esc(order.address) || '—')}
+                ${hasLocation ? row('লোকেশন', locationHtml) : ''}
+                ${order.notes ? row('নির্দেশনা', esc(order.notes)) : ''}
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:14px 28px 0">
+              <div style="font:700 15px ${F};color:#1b1b1f">🛍️ অর্ডারের আইটেম</div>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
+                ${itemRows}
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:10px 28px 4px">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
+                <tr>
+                  <td style="padding:5px 0;font:13px ${F};color:#6b6b74">আইটেম মোট</td>
+                  <td align="right" style="font:600 14px ${F};color:#1b1b1f">${order.subtotal ? `৳ ${bn(order.subtotal)}` : 'ক্যাশ মেমো অনুযায়ী'}</td>
+                </tr>
+                <tr>
+                  <td style="padding:5px 0;font:13px ${F};color:#6b6b74">ডেলিভারি</td>
+                  <td align="right" style="font:600 14px ${F};color:#1b1b1f">৳ ${bn(order.deliveryCharge || 30)}</td>
+                </tr>
+                <tr>
+                  <td style="padding:12px 0 0;border-top:2px dashed #f0d3de;font:700 16px ${F};color:#1b1b1f">সর্বমোট <span style="font:12px ${F};color:#6b6b74;font-weight:400">(ক্যাশ অন ডেলিভারি)</span></td>
+                  <td align="right" style="padding:12px 0 0;border-top:2px dashed #f0d3de;font:800 20px ${F};color:#e8487a">৳ ${bn(totalCalculated)}</td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:20px 28px 6px">
+              <a href="${manageUrl}" target="_blank" style="display:inline-block;background:#12a091;color:#ffffff;font:700 14px ${F};text-decoration:none;padding:14px 26px;border-radius:16px;margin:4px 4px 0 0">অর্ডার ম্যানেজ করো</a>
+              <a href="tel:${esc(order.phone)}" style="display:inline-block;background:#1b1b1f;color:#ffffff;font:700 14px ${F};text-decoration:none;padding:14px 26px;border-radius:16px;margin:4px 4px 0 0">📞 গ্রাহককে কল</a>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:8px 28px 14px">
+              <div style="font:12px ${F};color:#888892">
+                🔒 নিরাপত্তা নোট: অর্ডার ম্যানেজ বাটনে চাপ দিলে সরাসরি এই অর্ডারের ম্যানেজমেন্ট পেজ ওপেন হবে। অননুমোদিত অ্যাক্সেস ঠেকাতে পাসকোড চাওয়া হবে।
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:14px 28px 24px">
+              <div style="border-top:1px solid #f3e3ea;padding-top:14px;font:12px ${F};color:#6b6b74;line-height:1.6">এই মেইলটি স্বয়ংক্রিয়ভাবে পাঠানো হয়েছে · দরকার — ভাওয়াল মির্জাপুর বাজার</div>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
 
   const textLines = (order.lines && order.lines.length > 0)
     ? order.lines.map((l, i) => `${i + 1}. ${l.n} × ${l.q} = ${l.p ? `৳${l.p * l.q}` : 'মেমো অনুযায়ী'}${l.o && Object.keys(l.o).length ? ` [${Object.entries(l.o).map(([k, v]) => `${k}:${v}`).join(', ')}]` : ''}${l.note ? ` (নোট: ${l.note})` : ''}`).join('\n')
