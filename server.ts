@@ -501,7 +501,7 @@ async function sendOrderNotificationEmail(
     }
   } catch (e) {}
 
-  const esc = (t: any) => String(t == null ? '' : t).replace(/[&<>"]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]));
+  const esc = (t: any) => String(t == null ? '' : t).replace(/[&<>"]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m] || m));
   const bn = (n: any) => Number(n || 0).toLocaleString('bn-BD', { maximumFractionDigits: 1 });
   const F = "'Hind Siliguri','Noto Sans Bengali',Segoe UI,Arial,sans-serif";
   const row = (a: string, b: string) => `<tr><td style="padding:6px 0;font:13px ${F};color:#6b6b74;width:92px;vertical-align:top">${a}</td><td style="padding:6px 0;font:600 14px ${F};color:#1b1b1f">${b}</td></tr>`;

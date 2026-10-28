@@ -897,6 +897,21 @@
   "lastOsmSyncTime": "2026-10-24T12:21:21.554Z",
   "auditLogs": [
     {
+      "timestamp": "2026-10-28T12:31:09.365Z",
+      "action": "ORDER_UPDATED",
+      "details": "অর্ডার স্ট্যাটাস আপডেট: #DKR-MVS3F1U8-1499 -> প্রস্তুত হচ্ছে"
+    },
+    {
+      "timestamp": "2026-10-28T12:31:00.050Z",
+      "action": "ORDER_UPDATED",
+      "details": "অর্ডার স্ট্যাটাস আপডেট: #DKR-MVS3F1U8-1499 -> নতুন অর্ডার"
+    },
+    {
+      "timestamp": "2026-10-28T12:30:56.528Z",
+      "action": "ORDER_CREATED",
+      "details": "নতুন অর্ডার গ্রহণ করা হয়েছে: #DKR-MVS3F1U8-1499 - রোহান ইসলাম (01779616877) - মোট: ৳470"
+    },
+    {
       "timestamp": "2026-10-27T09:02:08.562Z",
       "action": "ORDER_UPDATED",
       "details": "অর্ডার স্ট্যাটাস আপডেট: #DKR-MVQGIFL1-2451 -> রাস্তায় আছে"
@@ -1033,6 +1048,37 @@
     }
   ],
   "orders": [
+    {
+      "id": "DKR-MVS3F1U8-1499",
+      "customerName": "রোহান ইসলাম",
+      "phone": "01779616877",
+      "items": "1. খাসির কাচ্চি বিরিয়ানি × 2 (৳440)",
+      "address": "মির্জাপুর কলেজ রোড, বাজার সংলগ্ন",
+      "notes": "",
+      "preferredStore": "কাচ্চি ডাইন মির্জাপুর",
+      "category": "খাবার ও রেস্তোরাঁ",
+      "createdAt": "2026-10-28T12:30:56.528Z",
+      "timestamp": 1793190656528,
+      "deliveryCharge": 30,
+      "subtotal": 440,
+      "total": 470,
+      "status": "প্রস্তুত হচ্ছে",
+      "source": "mirzapur-web",
+      "lines": [
+        {
+          "pid": null,
+          "n": "খাসির কাচ্চি বিরিয়ানি",
+          "q": 2,
+          "p": 220,
+          "sample": false
+        }
+      ],
+      "emailSent": true,
+      "emailSentAt": "2026-10-28T12:31:00.050Z",
+      "st": 1,
+      "x": false,
+      "updatedAt": "2026-10-28T12:31:09.365Z"
+    },
     {
       "id": "DKR-MVQGIFL1-2451",
       "customerName": "রোহান ইসলাম",
