@@ -150,3 +150,61 @@ export interface FilterState {
   priceFilter: 'all' | '৳' | '৳৳' | '৳৳৳';
   minRating: number;
 }
+
+export type BloodGroup = 'A+' | 'A−' | 'B+' | 'B−' | 'O+' | 'O−' | 'AB+' | 'AB−';
+
+export interface BloodVolunteer {
+  id: string;
+  name: string;
+  phone: string;
+  message?: string;
+  createdAt: string;
+  timestamp: number;
+}
+
+export interface BloodRequestRecord {
+  id: string;
+  bloodGroup: BloodGroup | string;
+  urgency: number; // 0: 'জরুরি — এখনই', 1: 'আজকের মধ্যে', 2: 'এই সপ্তাহে'
+  urgencyLabel: string;
+  bagsNeeded: number;
+  hospital: string;
+  area: string;
+  patientName?: string;
+  phone: string;
+  note?: string;
+  status: 'active' | 'fulfilled' | 'cancelled';
+  createdAt: string;
+  timestamp: number;
+  updatedAt?: string;
+  creatorToken: string;
+  volunteers: BloodVolunteer[];
+}
+
+export interface BloodDonorRecord {
+  id: string;
+  name: string;
+  bloodGroup: BloodGroup | string;
+  area: string;
+  phone: string;
+  lastDonationDate?: string;
+  status: 'active' | 'inactive';
+  createdAt: string;
+  timestamp: number;
+  creatorToken: string;
+}
+
+export interface PushSubscriptionRecord {
+  id: string;
+  phone?: string;
+  orderIds: string[];
+  endpoint: string;
+  keys: {
+    p256dh: string;
+    auth: string;
+  };
+  userAgent?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+

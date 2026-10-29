@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { BusinessItem, CategoryId, ClaimRequest, PlatformStats } from '../types';
+import { BusinessItem, CategoryId, ClaimRequest, PlatformStats, BloodRequestRecord, BloodDonorRecord, BloodVolunteer, PushSubscriptionRecord } from '../types';
 import { BHAWAL_MIRZAPUR_GEO } from '../data/geo';
 
 export { BHAWAL_MIRZAPUR_GEO };
@@ -50,6 +50,10 @@ interface DatabaseSchema {
   businesses: BusinessItem[];
   claims: ClaimRequest[];
   orders?: OrderRecord[];
+  bloodRequests?: BloodRequestRecord[];
+  bloodDonors?: BloodDonorRecord[];
+  pushSubscriptions?: PushSubscriptionRecord[];
+  vapidKeys?: { publicKey: string; privateKey: string };
   lastOsmSyncTime?: string;
   auditLogs: { timestamp: string; action: string; details: string }[];
 }
@@ -440,7 +444,7 @@ const INITIAL_BASELINE_BUSINESSES: BusinessItem[] = [
   },
 ];
 
-// Initialize database
+// Initialize database with genuine user data only
 function initDatabase(): DatabaseSchema {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -453,6 +457,15 @@ function initDatabase(): DatabaseSchema {
       if (Array.isArray(parsed.businesses) && parsed.businesses.length > 0) {
         if (!Array.isArray(parsed.orders)) {
           parsed.orders = [];
+        }
+        if (!Array.isArray(parsed.bloodRequests)) {
+          parsed.bloodRequests = [];
+        }
+        if (!Array.isArray(parsed.bloodDonors)) {
+          parsed.bloodDonors = [];
+        }
+        if (!Array.isArray(parsed.pushSubscriptions)) {
+          parsed.pushSubscriptions = [];
         }
         return parsed;
       }
@@ -479,6 +492,9 @@ function initDatabase(): DatabaseSchema {
       },
     ],
     orders: [],
+    bloodRequests: [],
+    bloodDonors: [],
+    pushSubscriptions: [],
     lastOsmSyncTime: '2026-03-24T04:30:00Z',
     auditLogs: [
       {
@@ -997,9 +1013,9 @@ export const db = {
       category: (orderData.category || '').trim() || 'সাধারণ কেনাকাটা',
       createdAt: orderData.createdAt || now.toISOString(),
       timestamp: orderData.timestamp || now.getTime(),
-      deliveryCharge: orderData.deliveryCharge !== undefined ? orderData.deliveryCharge : 60,
+      deliveryCharge: orderData.deliveryCharge !== undefined ? orderData.deliveryCharge : 30,
       subtotal: orderData.subtotal || 0,
-      total: orderData.total || ((orderData.subtotal || 0) + (orderData.deliveryCharge !== undefined ? orderData.deliveryCharge : 60)),
+      total: orderData.total || ((orderData.subtotal || 0) + (orderData.deliveryCharge !== undefined ? orderData.deliveryCharge : 30)),
       status: orderData.status || 'নতুন অর্ডার',
       source: orderData.source || 'mirzapur-web',
       businessId: orderData.businessId,
@@ -1044,6 +1060,12 @@ export const db = {
     if (query?.status) {
       res = res.filter((o) => o.status === query.status);
     }
+    // Always sort newest orders at the top, sorted by actual creation time (createdAt descending)
+    res.sort((a, b) => {
+      const timeA = a.timestamp || (a.createdAt ? Date.parse(a.createdAt) : 0);
+      const timeB = b.timestamp || (b.createdAt ? Date.parse(b.createdAt) : 0);
+      return timeB - timeA;
+    });
     if (query?.limit) {
       res = res.slice(0, query.limit);
     }
@@ -1064,6 +1086,291 @@ export const db = {
 
     persistDb();
     return order;
+  },
+
+  // ==========================================
+  // Blood Donation Community Management
+  // ==========================================
+  getBloodRequests(query?: { bloodGroup?: string; status?: string; limit?: number }): BloodRequestRecord[] {
+    if (!Array.isArray(dbInstance.bloodRequests)) {
+      dbInstance.bloodRequests = [];
+      return [];
+    }
+    let res = [...dbInstance.bloodRequests];
+    if (query?.bloodGroup && query.bloodGroup !== 'all') {
+      res = res.filter((r) => r.bloodGroup === query.bloodGroup);
+    }
+    if (query?.status) {
+      res = res.filter((r) => r.status === query.status);
+    }
+    // Sort: active first, then urgency (0=highest), then latest timestamp
+    res.sort((a, b) => {
+      const aAct = a.status === 'active' ? 1 : 0;
+      const bAct = b.status === 'active' ? 1 : 0;
+      if (aAct !== bAct) return bAct - aAct;
+      if (a.urgency !== b.urgency) return a.urgency - b.urgency;
+      return b.timestamp - a.timestamp;
+    });
+    if (query?.limit) {
+      res = res.slice(0, query.limit);
+    }
+    return res;
+  },
+
+  getBloodRequestById(id: string): BloodRequestRecord | undefined {
+    if (!Array.isArray(dbInstance.bloodRequests)) return undefined;
+    return dbInstance.bloodRequests.find((r) => r.id === id);
+  },
+
+  createBloodRequest(data: Partial<BloodRequestRecord>): BloodRequestRecord {
+    if (!Array.isArray(dbInstance.bloodRequests)) {
+      dbInstance.bloodRequests = [];
+    }
+    const id = data.id || `BLR-${Date.now().toString(36).toUpperCase()}-${Math.floor(1000 + Math.random() * 9000)}`;
+    const now = new Date();
+    const URGENCIES = ['জরুরি — এখনই', 'আজকের মধ্যে', 'এই সপ্তাহে'];
+    const uIdx = typeof data.urgency === 'number' ? Math.max(0, Math.min(2, data.urgency)) : 0;
+
+    const newReq: BloodRequestRecord = {
+      id,
+      bloodGroup: data.bloodGroup || 'O+',
+      urgency: uIdx,
+      urgencyLabel: data.urgencyLabel || URGENCIES[uIdx],
+      bagsNeeded: Math.max(1, data.bagsNeeded || 1),
+      hospital: (data.hospital || '').trim(),
+      area: (data.area || '').trim() || 'ভাওয়াল মির্জাপুর',
+      patientName: (data.patientName || '').trim() || undefined,
+      phone: (data.phone || '').trim(),
+      note: (data.note || '').trim() || undefined,
+      status: (data.status as any) || 'active',
+      createdAt: data.createdAt || now.toISOString(),
+      timestamp: data.timestamp || now.getTime(),
+      creatorToken: data.creatorToken || `tok-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+      volunteers: Array.isArray(data.volunteers) ? data.volunteers : [],
+    };
+
+    dbInstance.bloodRequests.unshift(newReq);
+    dbInstance.auditLogs.unshift({
+      timestamp: now.toISOString(),
+      action: 'BLOOD_REQUEST_CREATED',
+      details: `রক্তের অনুরোধ পোস্ট: #${newReq.id} - গ্রুপ: ${newReq.bloodGroup} - হাসপাতাল: ${newReq.hospital}`,
+    });
+
+    persistDb();
+    return newReq;
+  },
+
+  updateBloodRequest(id: string, updates: Partial<BloodRequestRecord>): BloodRequestRecord | undefined {
+    if (!Array.isArray(dbInstance.bloodRequests)) return undefined;
+    const req = dbInstance.bloodRequests.find((r) => r.id === id);
+    if (!req) return undefined;
+
+    Object.assign(req, updates, { updatedAt: new Date().toISOString() });
+    dbInstance.auditLogs.unshift({
+      timestamp: new Date().toISOString(),
+      action: 'BLOOD_REQUEST_UPDATED',
+      details: `রক্তের অনুরোধ আপডেট: #${req.id} -> ${req.status}`,
+    });
+
+    persistDb();
+    return req;
+  },
+
+  deleteBloodRequest(id: string): boolean {
+    if (!Array.isArray(dbInstance.bloodRequests)) return false;
+    const idx = dbInstance.bloodRequests.findIndex((r) => r.id === id);
+    if (idx === -1) return false;
+
+    dbInstance.bloodRequests.splice(idx, 1);
+    dbInstance.auditLogs.unshift({
+      timestamp: new Date().toISOString(),
+      action: 'BLOOD_REQUEST_DELETED',
+      details: `রক্তের অনুরোধ মুছে ফেলা হয়েছে: #${id}`,
+    });
+
+    persistDb();
+    return true;
+  },
+
+  addBloodVolunteer(requestId: string, volunteer: { name: string; phone: string; message?: string }): BloodRequestRecord | undefined {
+    if (!Array.isArray(dbInstance.bloodRequests)) return undefined;
+    const req = dbInstance.bloodRequests.find((r) => r.id === requestId);
+    if (!req) return undefined;
+
+    const volRecord: BloodVolunteer = {
+      id: `vol-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
+      name: volunteer.name.trim(),
+      phone: volunteer.phone.trim(),
+      message: volunteer.message ? volunteer.message.trim() : undefined,
+      createdAt: new Date().toISOString(),
+      timestamp: Date.now(),
+    };
+
+    if (!Array.isArray(req.volunteers)) {
+      req.volunteers = [];
+    }
+    req.volunteers.push(volRecord);
+    req.updatedAt = new Date().toISOString();
+
+    dbInstance.auditLogs.unshift({
+      timestamp: new Date().toISOString(),
+      action: 'BLOOD_VOLUNTEER_ADDED',
+      details: `রক্তদাতা স্বেচ্ছাসেবী সাড়া দিয়েছেন: #${req.id} - ${volRecord.name} (${volRecord.phone})`,
+    });
+
+    persistDb();
+    return req;
+  },
+
+  getBloodDonors(query?: { bloodGroup?: string; status?: string; limit?: number }): BloodDonorRecord[] {
+    if (!Array.isArray(dbInstance.bloodDonors)) {
+      dbInstance.bloodDonors = [];
+      return [];
+    }
+    let res = [...dbInstance.bloodDonors];
+    if (query?.bloodGroup && query.bloodGroup !== 'all') {
+      res = res.filter((d) => d.bloodGroup === query.bloodGroup);
+    }
+    if (query?.status) {
+      res = res.filter((d) => d.status === query.status);
+    }
+    // Eligible donors (90+ days since last donation) first, then latest
+    res.sort((a, b) => {
+      const aEligible = !a.lastDonationDate || (Date.now() - Date.parse(a.lastDonationDate)) / 864e5 >= 90 ? 1 : 0;
+      const bEligible = !b.lastDonationDate || (Date.now() - Date.parse(b.lastDonationDate)) / 864e5 >= 90 ? 1 : 0;
+      if (aEligible !== bEligible) return bEligible - aEligible;
+      return b.timestamp - a.timestamp;
+    });
+    if (query?.limit) {
+      res = res.slice(0, query.limit);
+    }
+    return res;
+  },
+
+  getBloodDonorById(id: string): BloodDonorRecord | undefined {
+    if (!Array.isArray(dbInstance.bloodDonors)) return undefined;
+    return dbInstance.bloodDonors.find((d) => d.id === id);
+  },
+
+  createBloodDonor(data: Partial<BloodDonorRecord>): BloodDonorRecord {
+    if (!Array.isArray(dbInstance.bloodDonors)) {
+      dbInstance.bloodDonors = [];
+    }
+    const id = data.id || `DON-${Date.now().toString(36).toUpperCase()}-${Math.floor(1000 + Math.random() * 9000)}`;
+    const now = new Date();
+
+    const newDonor: BloodDonorRecord = {
+      id,
+      name: (data.name || '').trim(),
+      bloodGroup: data.bloodGroup || 'O+',
+      area: (data.area || '').trim() || 'ভাওয়াল মির্জাপুর',
+      phone: (data.phone || '').trim(),
+      lastDonationDate: data.lastDonationDate ? data.lastDonationDate.trim() : undefined,
+      status: 'active',
+      createdAt: data.createdAt || now.toISOString(),
+      timestamp: data.timestamp || now.getTime(),
+      creatorToken: data.creatorToken || `tok-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+    };
+
+    dbInstance.bloodDonors.unshift(newDonor);
+    dbInstance.auditLogs.unshift({
+      timestamp: now.toISOString(),
+      action: 'BLOOD_DONOR_REGISTERED',
+      details: `রক্তদাতা নিবন্ধিত: #${newDonor.id} - ${newDonor.name} (${newDonor.bloodGroup})`,
+    });
+
+    persistDb();
+    return newDonor;
+  },
+
+  deleteBloodDonor(id: string): boolean {
+    if (!Array.isArray(dbInstance.bloodDonors)) return false;
+    const idx = dbInstance.bloodDonors.findIndex((d) => d.id === id);
+    if (idx === -1) return false;
+
+    dbInstance.bloodDonors.splice(idx, 1);
+    dbInstance.auditLogs.unshift({
+      timestamp: new Date().toISOString(),
+      action: 'BLOOD_DONOR_DELETED',
+      details: `রক্তদাতা তালিকা থেকে সরানো হয়েছে: #${id}`,
+    });
+
+    persistDb();
+    return true;
+  },
+
+  // Push Notification Subscriptions & VAPID Keys
+  getVapidKeys(): { publicKey: string; privateKey: string } | undefined {
+    return dbInstance.vapidKeys;
+  },
+
+  saveVapidKeys(keys: { publicKey: string; privateKey: string }) {
+    dbInstance.vapidKeys = keys;
+    persistDb();
+  },
+
+  savePushSubscription(data: {
+    phone?: string;
+    orderId?: string;
+    endpoint: string;
+    keys: { p256dh: string; auth: string };
+    userAgent?: string;
+  }): PushSubscriptionRecord {
+    if (!Array.isArray(dbInstance.pushSubscriptions)) {
+      dbInstance.pushSubscriptions = [];
+    }
+
+    const cleanPhone = data.phone ? data.phone.replace(/[\s-]/g, '').replace(/^(\+?88)/, '') : undefined;
+    const now = new Date().toISOString();
+
+    const existingIdx = dbInstance.pushSubscriptions.findIndex((s) => s.endpoint === data.endpoint);
+    if (existingIdx !== -1) {
+      const existing = dbInstance.pushSubscriptions[existingIdx];
+      if (cleanPhone && !existing.phone) existing.phone = cleanPhone;
+      if (data.orderId && !existing.orderIds.includes(data.orderId)) {
+        existing.orderIds.push(data.orderId);
+      }
+      existing.keys = data.keys;
+      existing.updatedAt = now;
+      persistDb();
+      return existing;
+    }
+
+    const newSub: PushSubscriptionRecord = {
+      id: `sub-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      phone: cleanPhone,
+      orderIds: data.orderId ? [data.orderId] : [],
+      endpoint: data.endpoint,
+      keys: data.keys,
+      userAgent: data.userAgent,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    dbInstance.pushSubscriptions.push(newSub);
+    persistDb();
+    return newSub;
+  },
+
+  getPushSubscriptionsForCustomer(orderId: string, phone?: string): PushSubscriptionRecord[] {
+    if (!Array.isArray(dbInstance.pushSubscriptions)) return [];
+    const cleanPhone = phone ? phone.replace(/[\s-]/g, '').replace(/^(\+?88)/, '') : undefined;
+    return dbInstance.pushSubscriptions.filter((s) => {
+      if (s.orderIds.includes(orderId)) return true;
+      if (cleanPhone && s.phone && s.phone === cleanPhone) return true;
+      return false;
+    });
+  },
+
+  removePushSubscription(endpoint: string): boolean {
+    if (!Array.isArray(dbInstance.pushSubscriptions)) return false;
+    const idx = dbInstance.pushSubscriptions.findIndex((s) => s.endpoint === endpoint);
+    if (idx !== -1) {
+      dbInstance.pushSubscriptions.splice(idx, 1);
+      persistDb();
+      return true;
+    }
+    return false;
   },
 };
 

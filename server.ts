@@ -3,6 +3,7 @@ import express, { Request, Response } from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import nodemailer from 'nodemailer';
+import webpush from 'web-push';
 import { db, BHAWAL_MIRZAPUR_GEO, OrderRecord } from './src/server/db';
 import { CATEGORIES } from './src/data/mockData';
 
@@ -14,6 +15,120 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const isProd = process.env.NODE_ENV === 'production';
 
 app.use(express.json());
+
+// Web Push VAPID setup & Device Notification Engine
+function initVapid(): { publicKey: string; privateKey: string } {
+  const existing = db.getVapidKeys();
+  if (existing?.publicKey && existing?.privateKey) {
+    try {
+      webpush.setVapidDetails(
+        'mailto:rohanisllam@gmail.com',
+        existing.publicKey,
+        existing.privateKey
+      );
+      return existing;
+    } catch (e) {}
+  }
+
+  const generated = webpush.generateVAPIDKeys();
+  db.saveVapidKeys(generated);
+  webpush.setVapidDetails(
+    'mailto:rohanisllam@gmail.com',
+    generated.publicKey,
+    generated.privateKey
+  );
+  return generated;
+}
+
+const vapidKeys = initVapid();
+
+interface NotificationClient {
+  id: string;
+  res: Response;
+  phone?: string;
+  orderIds: string[];
+}
+const notificationClients: NotificationClient[] = [];
+
+async function sendCustomerOrderNotification(
+  order: OrderRecord,
+  newStatus: string,
+  stNumber: number,
+  isCancelled: boolean
+) {
+  let title = `📦 দরকার — অর্ডার #${order.id} স্ট্যাটাস আপডেট`;
+  let body = `আপনার অর্ডারের বর্তমান অবস্থা: ${newStatus}`;
+
+  if (isCancelled) {
+    title = `❌ দরকার — অর্ডার #${order.id} বাতিল করা হয়েছে`;
+    body = `আপনার অর্ডারটি বাতিল করা হয়েছে। প্রয়োজনে সরাসরি যোগাযোগ করুন।`;
+  } else if (stNumber === 1 || newStatus.includes('প্রস্তুত')) {
+    title = `🍳 দরকার — অর্ডার #${order.id} প্রস্তুত হচ্ছে`;
+    body = `আপনার অর্ডারটি প্রস্তুত করা হচ্ছে।`;
+  } else if (stNumber === 2 || newStatus.includes('আসে') || newStatus.includes('রাস্তায়') || newStatus.includes('ডেলিভারি আসছে')) {
+    title = `🚴 দরকার — অর্ডার #${order.id} ডেলিভারি বের হয়েছে`;
+    body = `রাইডার আপনার অর্ডারের ডেলিভারি নিয়ে বের হয়েছে! দ্রুতই আপনার ঠিকানায় পৌঁছাবে।`;
+  } else if (stNumber === 3 || newStatus.includes('সম্পন্ন') || newStatus.includes('পৌঁছে')) {
+    title = `✅ দরকার — অর্ডার #${order.id} ডেলিভারি সম্পন্ন!`;
+    body = `আপনার অর্ডারটি সফলভাবে ডেলিভারি সম্পন্ন হয়েছে। দরকার ব্যবহার করার জন্য ধন্যবাদ!`;
+  }
+
+  const payload = {
+    type: 'ORDER_STATUS_NOTIFICATION',
+    orderId: order.id,
+    status: newStatus,
+    st: stNumber,
+    isCancelled,
+    title,
+    body,
+    sound: true,
+    timestamp: Date.now(),
+    url: `/#track=${order.id}`,
+  };
+
+  const cleanPhone = (order.phone || '').replace(/[\s-]/g, '').replace(/^(\+?88)/, '');
+
+  // 1. Instant SSE notification stream to customer's active phone/device screen
+  const deadClients: string[] = [];
+  notificationClients.forEach((client) => {
+    const phoneMatch = cleanPhone && client.phone && client.phone === cleanPhone;
+    const orderMatch = client.orderIds.includes(order.id);
+    if (phoneMatch || orderMatch || (!client.phone && !client.orderIds.length)) {
+      try {
+        client.res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      } catch (err) {
+        deadClients.push(client.id);
+      }
+    }
+  });
+
+  if (deadClients.length) {
+    for (let i = notificationClients.length - 1; i >= 0; i--) {
+      if (deadClients.includes(notificationClients[i].id)) {
+        notificationClients.splice(i, 1);
+      }
+    }
+  }
+
+  // 2. Real Web Push Notification to customer's phone service worker
+  const subscriptions = db.getPushSubscriptionsForCustomer(order.id, cleanPhone);
+  for (const subRecord of subscriptions) {
+    try {
+      const pushSub = {
+        endpoint: subRecord.endpoint,
+        keys: subRecord.keys,
+      };
+      await webpush.sendNotification(pushSub, JSON.stringify(payload), {
+        TTL: 60 * 60 * 24, // 24 hours
+        urgency: 'high',
+      });
+    } catch (err: any) {
+      if (err.statusCode === 404 || err.statusCode === 410) {
+        db.removePushSubscription(subRecord.endpoint);
+      }
+    }
+  }
+}
 
 // API: Get Geo Scope Information
 app.get('/api/geo', (_req: Request, res: Response) => {
@@ -525,9 +640,10 @@ async function sendOrderNotificationEmail(
         <td align="right" style="padding:12px 0;border-bottom:1px solid #f3e3ea;font:700 14px ${F};color:#1b1b1f">${order.subtotal ? `৳ ${bn(order.subtotal)}` : 'মেমো অনুযায়ী'}</td>
       </tr>`;
 
-  const hasLocation = Boolean(order.latitude && order.longitude);
+  const hasLocation = Boolean(order.latitude != null && order.longitude != null && !isNaN(Number(order.latitude)) && !isNaN(Number(order.longitude)));
+  const mapsUrl = hasLocation ? `https://www.google.com/maps?q=${order.latitude},${order.longitude}` : '';
   const locationHtml = hasLocation
-    ? `<a href="https://maps.google.com/?q=${order.latitude},${order.longitude}" target="_blank" style="color:#12a091;text-decoration:none">ম্যাপে দেখো${order.distanceKm ? ' · ' + bn(order.distanceKm) + ' কিমি' : ''}</a>`
+    ? `<a href="${mapsUrl}" target="_blank" style="color:#0d9488;font-weight:700;text-decoration:none">${order.latitude}, ${order.longitude}${order.accuracyMeters ? ` (±${order.accuracyMeters}মি)` : ''} · ম্যাপে দেখো</a>`
     : '';
 
   const totalCalculated = order.total || ((order.subtotal || 0) + (order.deliveryCharge || 30));
@@ -559,11 +675,28 @@ async function sendOrderNotificationEmail(
                 ${row('নাম', esc(order.customerName))}
                 ${row('ফোন', `<a href="tel:${esc(order.phone)}" style="color:#12a091;text-decoration:none">${esc(order.phone)}</a>`)}
                 ${row('ঠিকানা', esc(order.address) || '—')}
-                ${hasLocation ? row('লোকেশন', locationHtml) : ''}
+                ${hasLocation ? row('GPS স্থানাঙ্ক', `<span style="font-family:monospace;font-weight:700;color:#0f172a">${order.latitude}, ${order.longitude}</span>${order.accuracyMeters ? `<span style="color:#64748b;font-size:11px;margin-left:6px">(নির্ভুলতা: ±${order.accuracyMeters}মি)</span>` : ''}`) : ''}
+                ${hasLocation ? row('ম্যাপ লিংক', `<a href="${mapsUrl}" target="_blank" style="color:#0d9488;font-weight:700;text-decoration:underline;word-break:break-all">${mapsUrl}</a>`) : ''}
                 ${order.notes ? row('নির্দেশনা', esc(order.notes)) : ''}
               </table>
             </td>
           </tr>
+          ${hasLocation ? `
+          <tr>
+            <td style="padding:6px 28px 8px">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#e6f7f5;border:1.5px solid #a4e5dc;border-radius:18px;overflow:hidden">
+                <tr>
+                  <td style="padding:14px 18px">
+                    <div style="font:700 14px ${F};color:#0a6c62;margin-bottom:4px">📍 কাস্টমারের সুনির্দিষ্ট GPS অবস্থান</div>
+                    <div style="font:13px ${F};color:#334155;margin-bottom:10px">
+                      সরাসরি স্থানাঙ্ক: <strong style="font-family:monospace;color:#0f172a">${order.latitude}, ${order.longitude}</strong>${order.accuracyMeters ? ` <span style="color:#64748b">(নির্ভুলতা: ±${order.accuracyMeters} মিটার)</span>` : ''}${order.distanceKm ? ` · <span style="color:#0a6c62;font-weight:600">দূরত্ব: প্রায় ${bn(order.distanceKm)} কিমি</span>` : ''}
+                    </div>
+                    <a href="${mapsUrl}" target="_blank" style="display:inline-block;background:#0d9488;color:#ffffff;font:700 13px ${F};text-decoration:none;padding:10px 18px;border-radius:12px">🗺️ গুগল ম্যাপে কাস্টমারের অবস্থান দেখো</a>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>` : ''}
           <tr>
             <td style="padding:14px 28px 0">
               <div style="font:700 15px ${F};color:#1b1b1f">🛍️ অর্ডারের আইটেম</div>
@@ -592,8 +725,9 @@ async function sendOrderNotificationEmail(
           </tr>
           <tr>
             <td style="padding:20px 28px 6px">
-              <a href="${manageUrl}" target="_blank" style="display:inline-block;background:#12a091;color:#ffffff;font:700 14px ${F};text-decoration:none;padding:14px 26px;border-radius:16px;margin:4px 4px 0 0">অর্ডার ম্যানেজ করো</a>
-              <a href="tel:${esc(order.phone)}" style="display:inline-block;background:#1b1b1f;color:#ffffff;font:700 14px ${F};text-decoration:none;padding:14px 26px;border-radius:16px;margin:4px 4px 0 0">📞 গ্রাহককে কল</a>
+              <a href="${manageUrl}" target="_blank" style="display:inline-block;background:#12a091;color:#ffffff;font:700 14px ${F};text-decoration:none;padding:14px 24px;border-radius:16px;margin:4px 4px 0 0">অর্ডার ম্যানেজ করো</a>
+              ${hasLocation ? `<a href="${mapsUrl}" target="_blank" style="display:inline-block;background:#2563eb;color:#ffffff;font:700 14px ${F};text-decoration:none;padding:14px 20px;border-radius:16px;margin:4px 4px 0 0">📍 ম্যাপে লোকেশন দেখো</a>` : ''}
+              <a href="tel:${esc(order.phone)}" style="display:inline-block;background:#1b1b1f;color:#ffffff;font:700 14px ${F};text-decoration:none;padding:14px 24px;border-radius:16px;margin:4px 4px 0 0">📞 গ্রাহককে কল</a>
             </td>
           </tr>
           <tr>
@@ -631,6 +765,8 @@ async function sendOrderNotificationEmail(
 নাম: ${order.customerName}
 মোবাইল: ${order.phone}
 ঠিকানা: ${order.address}
+${hasLocation ? `সুনির্দিষ্ট GPS স্থানাঙ্ক: ${order.latitude}, ${order.longitude}${order.accuracyMeters ? ` (নির্ভুলতা: ±${order.accuracyMeters} মিটার)` : ''}
+গুগল ম্যাপ সরাসরি লিংক: ${mapsUrl}` : 'GPS লোকেশন: দেওয়া হয়নি (গ্রাহক শুধুমাত্র লিখিত ঠিকানা দিয়েছেন)'}
 বিশেষ নির্দেশ: ${order.notes || 'কোনো নির্দেশ নেই'}
 ${order.distanceKm ? `দূরত্ব: প্রায় ${order.distanceKm} কিমি\n` : ''}
 📦 পণ্যের তালিকা:
@@ -756,6 +892,10 @@ app.post('/api/orders', async (req: Request, res: Response) => {
       }).join('\n');
     }
 
+    const parsedLat = (latitude !== undefined && latitude !== null && latitude !== '' && !isNaN(Number(latitude))) ? Number(latitude) : undefined;
+    const parsedLng = (longitude !== undefined && longitude !== null && longitude !== '' && !isNaN(Number(longitude))) ? Number(longitude) : undefined;
+    const parsedAcc = (req.body.accuracyMeters !== undefined && !isNaN(Number(req.body.accuracyMeters))) ? Number(req.body.accuracyMeters) : (req.body.accuracy !== undefined && !isNaN(Number(req.body.accuracy)) ? Number(req.body.accuracy) : undefined);
+
     const orderId = req.body.id ? String(req.body.id).trim() : `DKR-${Date.now().toString(36).toUpperCase()}-${Math.floor(1000 + Math.random() * 9000)}`;
     const existingOrder = db.getOrderById(orderId);
 
@@ -774,8 +914,9 @@ app.post('/api/orders', async (req: Request, res: Response) => {
         lines: sanitizedLines.length > 0 ? sanitizedLines : existingOrder.lines,
         items: cleanItems || existingOrder.items,
         businessId: businessId || existingOrder.businessId,
-        latitude: latitude !== undefined ? latitude : existingOrder.latitude,
-        longitude: longitude !== undefined ? longitude : existingOrder.longitude,
+        latitude: parsedLat !== undefined ? parsedLat : existingOrder.latitude,
+        longitude: parsedLng !== undefined ? parsedLng : existingOrder.longitude,
+        accuracyMeters: parsedAcc !== undefined ? parsedAcc : existingOrder.accuracyMeters,
         distanceKm: distanceKm !== undefined ? distanceKm : existingOrder.distanceKm,
       }) || existingOrder;
     } else {
@@ -793,9 +934,10 @@ app.post('/api/orders', async (req: Request, res: Response) => {
         subtotal: subtotal > 0 ? subtotal : undefined,
         deliveryCharge,
         total,
-        latitude,
-        longitude,
-        distanceKm,
+        latitude: parsedLat,
+        longitude: parsedLng,
+        accuracyMeters: parsedAcc,
+        distanceKm: distanceKm !== undefined ? distanceKm : undefined,
         status: req.body.status || 'নতুন অর্ডার',
         source: req.body.source || 'mirzapur-web',
         timestamp: Date.now(),
@@ -828,6 +970,7 @@ app.post('/api/orders', async (req: Request, res: Response) => {
       success: true,
       message: 'অর্ডার সফলভাবে গ্রহণ করা হয়েছে।',
       data: orderRecord,
+      order: orderRecord,
       emailSent: orderRecord.emailSent || false,
       emailStatus: emailResult.message,
       duplicateSkipped: !!emailResult.duplicateSkipped,
@@ -913,10 +1056,182 @@ app.patch('/api/orders/:id/status', (req: Request, res: Response) => {
     }
 
     const updated = db.updateOrderStatus(orderId, updates);
+    if (updated) {
+      sendCustomerOrderNotification(
+        updated,
+        String(updates.status),
+        typeof updates.st === 'number' ? updates.st : (order.st || 0),
+        !!updates.x
+      ).catch((err) => {
+        console.error('Push notification delivery error:', err);
+      });
+    }
+
     res.json({
       success: true,
       message: `অর্ডার #${orderId} এর স্ট্যাটাস সফলভাবে '${updates.status}' এ আপডেট করা হয়েছে।`,
       data: updated,
+      notificationSent: true,
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// API: Get VAPID Public Key for Web Push Registration
+app.get('/api/notifications/vapid-public-key', (_req: Request, res: Response) => {
+  res.json({
+    success: true,
+    publicKey: vapidKeys.publicKey,
+  });
+});
+
+// API: Register Customer Device Push Subscription Token
+app.post('/api/notifications/register-token', (req: Request, res: Response) => {
+  try {
+    const { phone, orderId, subscription, userAgent } = req.body;
+    if (!subscription || !subscription.endpoint || !subscription.keys) {
+      res.status(400).json({ success: false, error: 'সঠিক পুশ সাবস্ক্রিপশন টোকেন প্রদান করুন।' });
+      return;
+    }
+
+    const saved = db.savePushSubscription({
+      phone: phone ? String(phone) : undefined,
+      orderId: orderId ? String(orderId) : undefined,
+      endpoint: String(subscription.endpoint),
+      keys: {
+        p256dh: String(subscription.keys.p256dh || ''),
+        auth: String(subscription.keys.auth || ''),
+      },
+      userAgent: userAgent || req.headers['user-agent'],
+    });
+
+    res.json({
+      success: true,
+      message: 'ডিভাইস পুশ নোটিফিকেশন সফলভাবে নিবন্ধিত হয়েছে।',
+      data: { id: saved.id },
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// API: Real-Time Order Notifications SSE Stream
+app.get('/api/notifications/stream', (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+
+  const clientId = `notif-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const phoneParam = req.query.phone ? String(req.query.phone).replace(/[\s-]/g, '').replace(/^(\+?88)/, '') : undefined;
+  const orderIds = req.query.orderIds ? String(req.query.orderIds).split(',').map((s) => s.trim()).filter(Boolean) : [];
+
+  const client: NotificationClient = {
+    id: clientId,
+    res,
+    phone: phoneParam,
+    orderIds,
+  };
+  notificationClients.push(client);
+
+  res.write(`data: ${JSON.stringify({ type: 'CONNECTED', clientId, timestamp: Date.now() })}\n\n`);
+
+  const keepAliveInterval = setInterval(() => {
+    try {
+      res.write(': keepalive\n\n');
+    } catch (e) {
+      clearInterval(keepAliveInterval);
+    }
+  }, 25000);
+
+  req.on('close', () => {
+    clearInterval(keepAliveInterval);
+    const idx = notificationClients.findIndex((c) => c.id === clientId);
+    if (idx !== -1) {
+      notificationClients.splice(idx, 1);
+    }
+  });
+});
+
+// API: Exact Reverse Geocoding with Zero Hardcoding
+app.get('/api/location/reverse', async (req: Request, res: Response) => {
+  try {
+    const lat = req.query.lat ? String(req.query.lat) : '';
+    const lng = req.query.lng ? String(req.query.lng) : '';
+
+    if (!lat || !lng || isNaN(Number(lat)) || isNaN(Number(lng))) {
+      res.status(400).json({ success: false, error: 'সঠিক অক্ষাংশ ও দ্রাঘিমাংশ প্রদান করুন।' });
+      return;
+    }
+
+    const nLat = Number(lat).toFixed(6);
+    const nLng = Number(lng).toFixed(6);
+
+    const nominatimUrl = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${nLat}&lon=${nLng}&zoom=18&addressdetails=1&accept-language=bn,en`;
+
+    let geoData: any = null;
+    try {
+      const response = await fetch(nominatimUrl, {
+        headers: {
+          'User-Agent': 'DorkarApp/1.0 (contact: rohanisllam@gmail.com; Bhawal Mirzapur Bazar Marketplace)',
+          'Accept': 'application/json',
+        },
+      });
+      if (response.ok) {
+        geoData = await response.json();
+      }
+    } catch (e) {}
+
+    if (!geoData || !geoData.address) {
+      try {
+        const bdcUrl = `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${nLat}&longitude=${nLng}&localityLanguage=bn`;
+        const bdcRes = await fetch(bdcUrl);
+        if (bdcRes.ok) {
+          const bdc = await bdcRes.json();
+          geoData = {
+            display_name: [bdc.locality || bdc.city, bdc.principalSubdivision, bdc.countryName].filter(Boolean).join(', '),
+            address: {
+              road: bdc.locality,
+              suburb: bdc.city,
+              city: bdc.principalSubdivision,
+              country: bdc.countryName,
+            },
+          };
+        }
+      } catch (e) {}
+    }
+
+    let humanAddress = '';
+    if (geoData && geoData.address) {
+      const a = geoData.address;
+      const road = a.road || a.pedestrian || a.street || a.residential;
+      const locality = a.quarter || a.neighbourhood || a.suburb || a.village || a.hamlet;
+      const city = a.town || a.city_district || a.municipality || a.city;
+      const district = a.county || a.state_district;
+      const state = a.state;
+
+      const parts = [road, locality, city, district || state].filter(Boolean);
+      if (parts.length > 0) {
+        humanAddress = parts.join(', ');
+      }
+    }
+
+    if (!humanAddress && geoData && geoData.display_name) {
+      humanAddress = geoData.display_name.split(',').slice(0, 3).join(', ').trim();
+    }
+
+    res.json({
+      success: true,
+      data: {
+        lat: Number(nLat),
+        lng: Number(nLng),
+        humanAddress: humanAddress || '',
+        fullAddress: humanAddress ? `${humanAddress} (GPS: ${nLat}, ${nLng})` : `GPS: ${nLat}, ${nLng}`,
+        raw: geoData?.address || null,
+        displayName: geoData?.display_name || '',
+      },
     });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
@@ -1005,6 +1320,293 @@ app.get('/api/orders', (req: Request, res: Response) => {
       limit: limit ? parseInt(String(limit), 10) : undefined,
     });
     res.json({ success: true, count: orders.length, data: orders });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ==========================================
+// Blood Donation Community Real-time & API
+// ==========================================
+const bloodEventClients: Response[] = [];
+
+function broadcastBloodEvent(event: { type: string; action: string; data?: any }) {
+  const payload = `data: ${JSON.stringify({ ...event, timestamp: Date.now() })}\n\n`;
+  for (let i = bloodEventClients.length - 1; i >= 0; i--) {
+    const client = bloodEventClients[i];
+    try {
+      client.write(payload);
+    } catch {
+      bloodEventClients.splice(i, 1);
+    }
+  }
+}
+
+// API: Real-time Server-Sent Events stream for Blood Community Feed
+app.get('/api/blood/events', (req: Request, res: Response) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+  });
+  res.write(': connected\n\n');
+  bloodEventClients.push(res);
+
+  req.on('close', () => {
+    const idx = bloodEventClients.indexOf(res);
+    if (idx !== -1) bloodEventClients.splice(idx, 1);
+  });
+});
+
+// API: Get Shared Blood Feed (Requests & Donors)
+app.get('/api/blood/feed', (req: Request, res: Response) => {
+  try {
+    const { group, status, limit } = req.query;
+    const requests = db.getBloodRequests({
+      bloodGroup: group ? String(group) : undefined,
+      status: status !== undefined ? (status === 'all' ? undefined : String(status)) : 'active',
+      limit: limit ? parseInt(String(limit), 10) : 50,
+    });
+    const donors = db.getBloodDonors({
+      bloodGroup: group ? String(group) : undefined,
+      status: 'active',
+      limit: limit ? parseInt(String(limit), 10) : 50,
+    });
+
+    res.json({
+      success: true,
+      data: {
+        requests,
+        donors,
+        totalRequests: requests.length,
+        totalDonors: donors.length,
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// API: Publish a new Blood Request
+app.post('/api/blood/requests', (req: Request, res: Response) => {
+  try {
+    const { bloodGroup, urgency, bagsNeeded, hospital, area, patientName, phone, note } = req.body;
+
+    const VALID_GROUPS = ['A+', 'A−', 'B+', 'B−', 'O+', 'O−', 'AB+', 'AB−'];
+    if (!bloodGroup || !VALID_GROUPS.includes(String(bloodGroup))) {
+      res.status(400).json({ success: false, error: 'সঠিক রক্তের গ্রুপ নির্বাচন করুন (যেমন O+, A+, B+ ইত্যাদি)।' });
+      return;
+    }
+
+    if (!hospital || String(hospital).trim().length < 2) {
+      res.status(400).json({ success: false, error: 'হাসপাতাল বা ক্লিনিকের নাম সঠিকভাবে লিখুন।' });
+      return;
+    }
+
+    const cleanPhone = String(phone || '').replace(/[\s-]/g, '').replace(/^(\+?88)/, '');
+    if (!/^01[3-9]\d{8}$/.test(cleanPhone)) {
+      res.status(400).json({ success: false, error: 'সঠিক বাংলাদেশি মোবাইল নম্বর দিন (যেমন 01XXXXXXXXX)।' });
+      return;
+    }
+
+    const creatorToken = `tok-req-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const newReq = db.createBloodRequest({
+      bloodGroup: String(bloodGroup),
+      urgency: typeof urgency === 'number' ? urgency : 0,
+      bagsNeeded: Math.max(1, parseInt(String(bagsNeeded || 1), 10)),
+      hospital: String(hospital).trim(),
+      area: area ? String(area).trim() : 'ভাওয়াল মির্জাপুর',
+      patientName: patientName ? String(patientName).trim() : undefined,
+      phone: cleanPhone,
+      note: note ? String(note).trim() : undefined,
+      creatorToken,
+    });
+
+    broadcastBloodEvent({ type: 'BLOOD_UPDATE', action: 'REQUEST_CREATED', data: newReq });
+
+    res.status(201).json({
+      success: true,
+      message: 'রক্তের অনুরোধ সফলভাবে পোস্ট হয়েছে এবং সবার জন্য উন্মুক্ত করা হয়েছে।',
+      data: newReq,
+      creatorToken,
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// API: Offer to donate blood for a specific request ("🩸 আমি দিতে পারব")
+app.post('/api/blood/requests/:id/volunteer', (req: Request, res: Response) => {
+  try {
+    const { name, phone, message } = req.body;
+    if (!name || String(name).trim().length < 2) {
+      res.status(400).json({ success: false, error: 'আপনার নাম লিখুন।' });
+      return;
+    }
+    const cleanPhone = String(phone || '').replace(/[\s-]/g, '').replace(/^(\+?88)/, '');
+    if (!/^01[3-9]\d{8}$/.test(cleanPhone)) {
+      res.status(400).json({ success: false, error: 'সঠিক মোবাইল নম্বর দিন (যেমন 01XXXXXXXXX)।' });
+      return;
+    }
+
+    const updated = db.addBloodVolunteer(req.params.id, {
+      name: String(name),
+      phone: cleanPhone,
+      message: message ? String(message) : undefined,
+    });
+
+    if (!updated) {
+      res.status(404).json({ success: false, error: 'অনুরোধটি খুঁজে পাওয়া যায়নি।' });
+      return;
+    }
+
+    broadcastBloodEvent({ type: 'BLOOD_UPDATE', action: 'VOLUNTEER_ADDED', data: updated });
+
+    res.json({
+      success: true,
+      message: 'ধন্যবাদ! আপনার ইচ্ছা ও যোগাযোগের তথ্য অনুরোধকারীর কাছে পৌঁছে দেওয়া হয়েছে।',
+      data: updated,
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// API: Update blood request status (e.g. 'fulfilled' বা 'cancelled')
+app.patch('/api/blood/requests/:id', (req: Request, res: Response) => {
+  try {
+    const { status, creatorToken } = req.body;
+    const reqItem = db.getBloodRequestById(req.params.id);
+    if (!reqItem) {
+      res.status(404).json({ success: false, error: 'অনুরোধটি খুঁজে পাওয়া যায়নি।' });
+      return;
+    }
+
+    const isAdmin = isAuthorizedAdmin(req);
+    const hasCreatorToken = creatorToken && creatorToken === reqItem.creatorToken;
+    const tokenHeader = req.headers['x-creator-token'];
+    const hasHeaderToken = tokenHeader && tokenHeader === reqItem.creatorToken;
+
+    if (!isAdmin && !hasCreatorToken && !hasHeaderToken) {
+      res.status(403).json({ success: false, error: 'অননুমোদিত: আপনি শুধুমাত্র আপনার নিজের পোস্ট পরিবর্তন করতে পারেন।' });
+      return;
+    }
+
+    const updated = db.updateBloodRequest(req.params.id, {
+      status: status || 'fulfilled',
+    });
+
+    broadcastBloodEvent({ type: 'BLOOD_UPDATE', action: 'REQUEST_UPDATED', data: updated });
+
+    res.json({
+      success: true,
+      message: status === 'fulfilled' ? 'আলহামদুলিল্লাহ, রক্ত পাওয়ার তথ্য আপডেট হয়েছে।' : 'স্ট্যাটাস আপডেট হয়েছে।',
+      data: updated,
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// API: Delete blood request
+app.delete('/api/blood/requests/:id', (req: Request, res: Response) => {
+  try {
+    const reqItem = db.getBloodRequestById(req.params.id);
+    if (!reqItem) {
+      res.status(404).json({ success: false, error: 'অনুরোধটি খুঁজে পাওয়া যায়নি।' });
+      return;
+    }
+
+    const isAdmin = isAuthorizedAdmin(req);
+    const creatorToken = req.query.token || req.headers['x-creator-token'];
+    const isOwner = creatorToken && creatorToken === reqItem.creatorToken;
+
+    if (!isAdmin && !isOwner) {
+      res.status(403).json({ success: false, error: 'অননুমোদিত: শুধুমাত্র পোস্টকারী বা অ্যাডমিন মুছতে পারবেন।' });
+      return;
+    }
+
+    const ok = db.deleteBloodRequest(req.params.id);
+    broadcastBloodEvent({ type: 'BLOOD_UPDATE', action: 'REQUEST_DELETED', data: { id: req.params.id } });
+
+    res.json({ success: ok, message: 'পোস্টটি সফলভাবে মুছে ফেলা হয়েছে।' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// API: Register as Blood Donor
+app.post('/api/blood/donors', (req: Request, res: Response) => {
+  try {
+    const { name, bloodGroup, area, phone, lastDonationDate } = req.body;
+
+    if (!name || String(name).trim().length < 2) {
+      res.status(400).json({ success: false, error: 'আপনার পুরো নাম লিখুন।' });
+      return;
+    }
+
+    const VALID_GROUPS = ['A+', 'A−', 'B+', 'B−', 'O+', 'O−', 'AB+', 'AB−'];
+    if (!bloodGroup || !VALID_GROUPS.includes(String(bloodGroup))) {
+      res.status(400).json({ success: false, error: 'সঠিক রক্তের গ্রুপ নির্বাচন করুন।' });
+      return;
+    }
+
+    if (!area || String(area).trim().length < 2) {
+      res.status(400).json({ success: false, error: 'আপনার এলাকা বা রোড উল্লেখ করুন।' });
+      return;
+    }
+
+    const cleanPhone = String(phone || '').replace(/[\s-]/g, '').replace(/^(\+?88)/, '');
+    if (!/^01[3-9]\d{8}$/.test(cleanPhone)) {
+      res.status(400).json({ success: false, error: 'সঠিক মোবাইল নম্বর দিন (যেমন 01XXXXXXXXX)।' });
+      return;
+    }
+
+    const creatorToken = `tok-don-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const newDonor = db.createBloodDonor({
+      name: String(name).trim(),
+      bloodGroup: String(bloodGroup),
+      area: String(area).trim(),
+      phone: cleanPhone,
+      lastDonationDate: lastDonationDate ? String(lastDonationDate).trim() : undefined,
+      creatorToken,
+    });
+
+    broadcastBloodEvent({ type: 'BLOOD_UPDATE', action: 'DONOR_REGISTERED', data: newDonor });
+
+    res.status(201).json({
+      success: true,
+      message: 'ধন্যবাদ! আপনি সফলভাবে রক্তদাতা কমিউনিটিতে অন্তর্ভুক্ত হয়েছেন।',
+      data: newDonor,
+      creatorToken,
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// API: Delete Blood Donor registration
+app.delete('/api/blood/donors/:id', (req: Request, res: Response) => {
+  try {
+    const donor = db.getBloodDonorById(req.params.id);
+    if (!donor) {
+      res.status(404).json({ success: false, error: 'রক্তদাতা খুঁজে পাওয়া যায়নি।' });
+      return;
+    }
+
+    const isAdmin = isAuthorizedAdmin(req);
+    const creatorToken = req.query.token || req.headers['x-creator-token'];
+    const isOwner = creatorToken && creatorToken === donor.creatorToken;
+
+    if (!isAdmin && !isOwner) {
+      res.status(403).json({ success: false, error: 'অননুমোদিত: শুধুমাত্র ডোনার নিজে বা অ্যাডমিন মুছতে পারবেন।' });
+      return;
+    }
+
+    const ok = db.deleteBloodDonor(req.params.id);
+    broadcastBloodEvent({ type: 'BLOOD_UPDATE', action: 'DONOR_DELETED', data: { id: req.params.id } });
+
+    res.json({ success: ok, message: 'ডোনার প্রোফাইল সফলভাবে সরানো হয়েছে।' });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }
